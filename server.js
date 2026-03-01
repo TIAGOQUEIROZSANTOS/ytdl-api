@@ -132,8 +132,9 @@ async function getVideoData(url) {
       dumpSingleJson: true,
       noCheckCertificates: true,
       noWarnings: true,
-      preferFreeFormats: true,
-      addHeader: ['referer:https://www.youtube.com', 'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36']
+      skipDownload: true,
+      noPlaylist: true,
+      addHeader: ['referer:https://www.youtube.com', 'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36']
     };
     if (hasCookiesTxt()) {
       opts.cookies = COOKIES_TXT;
@@ -219,7 +220,79 @@ app.delete('/api/cookies', authenticate, (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET /api/info
+// POST /api/info (aceita cookies inline) e GET /api/info
+app.post('/api/info', authenticate, async (req, res) => {
+  try {
+    const url = req.body.url || req.query.url;
+    if (!url) return res.status(400).json({ error: 'URL é obrigatória' });
+
+    // Se recebeu cookies inline, salvar para uso
+    if (req.body.cookies && Array.isArray(req.body.cookies) && req.body.cookies.length > 0) {
+      const ytCookies = req.body.cookies.filter(c => c.domain && (c.domain.includes('youtube.com') || c.domain.includes('google.com')));
+      if (ytCookies.length > 0) {
+        saveCookies(ytCookies);
+        console.log(`[INFO] Cookies inline recebidos: ${ytCookies.length}`);
+      }
+    }
+
+    console.log(`[INFO] Buscando: ${url} (cookies: ${ytAgent ? 'SIM' : 'NAO'})`);
+    const data = await getVideoData(url);
+
+    const duration = parseInt(data.info.videoDetails.lengthSeconds);
+    if (duration > MAX_DURATION) {
+      return res.status(400).json({ error: `Vídeo muito longo (${Math.ceil(duration / 60)} min). Limite: ${Math.ceil(MAX_DURATION / 60)} min.` });
+    }
+
+    const videoFormats = data.formats
+      .filter(f => f.hasAudio && f.hasVideo && f.url)
+      .sort((a, b) => (b.height || 0) - (a.height || 0))
+      .slice(0, 6)
+      .map(f => ({
+        itag: f.itag,
+        mimeType: f.mimeType || 'video/mp4',
+        qualityLabel: f.qualityLabel || `${f.height}p`,
+        container: f.container || 'mp4',
+        contentLength: f.contentLength || '0',
+        fps: f.fps || 30,
+        hasAudio: true,
+        hasVideo: true
+      }));
+
+    const audioFormats = data.formats
+      .filter(f => f.hasAudio && !f.hasVideo && f.url)
+      .sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0))
+      .slice(0, 4)
+      .map(f => ({
+        itag: f.itag,
+        mimeType: f.mimeType || 'audio/mp4',
+        bitrate: f.audioBitrate || 0,
+        quality: `${f.audioBitrate || 128}kbps`,
+        container: f.container || 'mp4',
+        contentLength: f.contentLength || '0',
+        hasAudio: true,
+        hasVideo: false
+      }));
+
+    const thumbnails = data.info.videoDetails.thumbnails || [];
+    const thumbnail = thumbnails.length > 0 ? thumbnails[thumbnails.length - 1].url : '';
+
+    console.log(`[INFO] OK (${data.source}): "${data.info.videoDetails.title}" - ${videoFormats.length} video, ${audioFormats.length} audio`);
+
+    return res.json({
+      title: data.info.videoDetails.title,
+      duration: data.info.videoDetails.lengthSeconds,
+      thumbnail,
+      author: data.info.videoDetails.author?.name || '',
+      videoFormats,
+      audioFormats,
+      source: data.source
+    });
+  } catch (e) {
+    console.error(`[INFO] ERRO FINAL: ${e.message}`);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/info', authenticate, async (req, res) => {
   try {
     const { url } = req.query;
