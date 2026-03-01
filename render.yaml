@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: ytdl-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: API_KEY
+        value: seven7scala-ytdl-2024
+
