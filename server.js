@@ -125,9 +125,11 @@ async function getVideoData(url) {
     console.log(`[CORE] ytdl-core falhou: ${e1.message.substring(0, 100)}`);
   }
 
-  // 2) Fallback: yt-dlp
+  // 2) Fallback: yt-dlp (tenta múltiplos clients)
+  const ytdlpClients = ['ios', 'android', 'tv', 'default'];
+  for (const client of ytdlpClients) {
   try {
-    console.log(`[CORE] Tentando yt-dlp (cookies: ${hasCookiesTxt() ? 'SIM' : 'NAO'})...`);
+    console.log(`[CORE] Tentando yt-dlp client=${client} (cookies: ${hasCookiesTxt() ? 'SIM' : 'NAO'})...`);
     const opts = {
       dumpSingleJson: true,
       noCheckCertificates: true,
@@ -136,12 +138,17 @@ async function getVideoData(url) {
       noPlaylist: true,
       addHeader: ['referer:https://www.youtube.com', 'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36']
     };
+    if (client !== 'default') {
+      opts.extractorArgs = `youtube:player_client=${client}`;
+    }
     if (hasCookiesTxt()) {
       opts.cookies = COOKIES_TXT;
     }
 
     const info = await youtubedl(url, opts);
-    console.log(`[CORE] yt-dlp OK: "${info.title}" - ${(info.formats || []).length} formatos`);
+    const fmtsWithUrl = (info.formats || []).filter(f => f.url);
+    if (fmtsWithUrl.length === 0) throw new Error('Sem formatos com URL');
+    console.log(`[CORE] yt-dlp OK (client=${client}): "${info.title}" - ${fmtsWithUrl.length} formatos`);
 
     // Converter formatos yt-dlp para formato compatível
     const formats = (info.formats || [])
@@ -173,9 +180,12 @@ async function getVideoData(url) {
       formats
     };
   } catch (e2) {
-    console.error(`[CORE] yt-dlp falhou: ${e2.message?.substring(0, 150) || e2}`);
-    throw new Error(e2.message || 'Todos os métodos falharam');
+    console.log(`[CORE] yt-dlp client=${client} falhou: ${(e2.message || e2).substring(0, 150)}`);
+    continue;
   }
+  }
+  // Se chegou aqui, todos os métodos falharam
+  throw new Error('Todos os métodos falharam para este vídeo');
 }
 
 // ============================================================
