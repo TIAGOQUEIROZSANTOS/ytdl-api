@@ -126,7 +126,7 @@ async function getVideoData(url) {
   }
 
   // 2) Fallback: yt-dlp (tenta múltiplos clients)
-  const ytdlpClients = ['ios', 'android', 'tv', 'default'];
+  const ytdlpClients = ['mediaconnect', 'tv_embedded', 'android_vr', 'default'];
   for (const client of ytdlpClients) {
   try {
     console.log(`[CORE] Tentando yt-dlp client=${client} (cookies: ${hasCookiesTxt() ? 'SIM' : 'NAO'})...`);
