@@ -115,6 +115,8 @@ function parseCookiesTxt(text) {
 // CORE: Buscar info via ytdl-core, fallback yt-dlp
 // ============================================================
 async function getVideoData(url) {
+  const errors = [];
+
   // 1) Tentar ytdl-core
   try {
     console.log(`[CORE] Tentando ytdl-core (cookies: ${ytAgent ? 'SIM' : 'NAO'})...`);
@@ -124,70 +126,77 @@ async function getVideoData(url) {
     console.log(`[CORE] ytdl-core OK: ${playable.length} formatos`);
     return { source: 'ytdl-core', info, formats: info.formats };
   } catch (e1) {
-    console.log(`[CORE] ytdl-core falhou: ${e1.message.substring(0, 100)}`);
+    const msg = (e1.message || '').substring(0, 200);
+    console.log(`[CORE] ytdl-core falhou: ${msg}`);
+    errors.push(`ytdl-core: ${msg}`);
   }
 
   // 2) Fallback: yt-dlp (tenta múltiplos clients)
-  const ytdlpClients = ['mediaconnect', 'tv_embedded', 'android_vr', 'default'];
+  const ytdlpClients = ['default', 'mediaconnect', 'tv_embedded', 'android_vr'];
   for (const client of ytdlpClients) {
-  try {
-    console.log(`[CORE] Tentando yt-dlp client=${client} (cookies: ${hasCookiesTxt() ? 'SIM' : 'NAO'})...`);
-    const opts = {
-      dumpSingleJson: true,
-      noCheckCertificates: true,
-      noWarnings: true,
-      skipDownload: true,
-      noPlaylist: true,
-      addHeader: ['referer:https://www.youtube.com', 'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36']
-    };
-    if (client !== 'default') {
-      opts.extractorArgs = `youtube:player_client=${client}`;
+    try {
+      console.log(`[CORE] Tentando yt-dlp client=${client} (cookies: ${hasCookiesTxt() ? 'SIM' : 'NAO'})...`);
+      const opts = {
+        dumpSingleJson: true,
+        noCheckCertificates: true,
+        noWarnings: true,
+        skipDownload: true,
+        noPlaylist: true,
+        addHeader: ['referer:https://www.youtube.com', 'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36']
+      };
+      if (client !== 'default') {
+        opts.extractorArgs = `youtube:player_client=${client}`;
+      }
+      if (hasCookiesTxt()) {
+        opts.cookies = COOKIES_TXT;
+      }
+
+      const info = await youtubedl(url, opts);
+      const fmtsWithUrl = (info.formats || []).filter(f => f.url);
+      if (fmtsWithUrl.length === 0) throw new Error('Sem formatos com URL');
+      console.log(`[CORE] yt-dlp OK (client=${client}): "${info.title}" - ${fmtsWithUrl.length} formatos`);
+
+      // Converter formatos yt-dlp para formato compatível
+      const formats = (info.formats || [])
+        .filter(f => f.url)
+        .map(f => ({
+          itag: f.format_id ? parseInt(f.format_id) || 0 : 0,
+          url: f.url,
+          mimeType: f.vcodec !== 'none' ? `video/${f.ext || 'mp4'}` : `audio/${f.ext || 'mp4'}`,
+          qualityLabel: f.format_note || (f.height ? `${f.height}p` : ''),
+          hasVideo: f.vcodec !== 'none',
+          hasAudio: f.acodec !== 'none',
+          height: f.height || 0,
+          audioBitrate: f.abr || 0,
+          contentLength: f.filesize ? String(f.filesize) : '0',
+          container: f.ext || 'mp4',
+          fps: f.fps || 30
+        }));
+
+      return {
+        source: 'yt-dlp',
+        info: {
+          videoDetails: {
+            title: info.title || 'video',
+            lengthSeconds: String(info.duration || 0),
+            thumbnails: info.thumbnail ? [{ url: info.thumbnail }] : [],
+            author: { name: info.uploader || info.channel || '' }
+          }
+        },
+        formats
+      };
+    } catch (e2) {
+      const msg = ((e2.stderr || e2.message || String(e2))).substring(0, 300);
+      console.log(`[CORE] yt-dlp client=${client} falhou: ${msg}`);
+      errors.push(`yt-dlp(${client}): ${msg.substring(0, 100)}`);
+      continue;
     }
-    if (hasCookiesTxt()) {
-      opts.cookies = COOKIES_TXT;
-    }
-
-    const info = await youtubedl(url, opts);
-    const fmtsWithUrl = (info.formats || []).filter(f => f.url);
-    if (fmtsWithUrl.length === 0) throw new Error('Sem formatos com URL');
-    console.log(`[CORE] yt-dlp OK (client=${client}): "${info.title}" - ${fmtsWithUrl.length} formatos`);
-
-    // Converter formatos yt-dlp para formato compatível
-    const formats = (info.formats || [])
-      .filter(f => f.url)
-      .map(f => ({
-        itag: f.format_id ? parseInt(f.format_id) || 0 : 0,
-        url: f.url,
-        mimeType: f.vcodec !== 'none' ? `video/${f.ext || 'mp4'}` : `audio/${f.ext || 'mp4'}`,
-        qualityLabel: f.format_note || (f.height ? `${f.height}p` : ''),
-        hasVideo: f.vcodec !== 'none',
-        hasAudio: f.acodec !== 'none',
-        height: f.height || 0,
-        audioBitrate: f.abr || 0,
-        contentLength: f.filesize ? String(f.filesize) : '0',
-        container: f.ext || 'mp4',
-        fps: f.fps || 30
-      }));
-
-    return {
-      source: 'yt-dlp',
-      info: {
-        videoDetails: {
-          title: info.title || 'video',
-          lengthSeconds: String(info.duration || 0),
-          thumbnails: info.thumbnail ? [{ url: info.thumbnail }] : [],
-          author: { name: info.uploader || info.channel || '' }
-        }
-      },
-      formats
-    };
-  } catch (e2) {
-    console.log(`[CORE] yt-dlp client=${client} falhou: ${(e2.message || e2).substring(0, 150)}`);
-    continue;
   }
-  }
-  // Se chegou aqui, todos os métodos falharam
-  throw new Error('Todos os métodos falharam para este vídeo');
+
+  // Se chegou aqui, todos os métodos falharam - retornar detalhes
+  const detailedError = `Todos os métodos falharam. Detalhes: ${errors.join(' | ')}`;
+  console.log(`[CORE] ${detailedError}`);
+  throw new Error(detailedError);
 }
 
 // ============================================================
@@ -195,7 +204,7 @@ async function getVideoData(url) {
 // ============================================================
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'ytdl-api', version: '2.1.0', cookies: ytAgent ? 'configurados' : 'nao_configurados' });
+  res.json({ status: 'ok', service: 'ytdl-api', version: '2.3.0', cookies: ytAgent ? 'configurados' : 'nao_configurados', cookieFile: fs.existsSync(COOKIES_TXT) });
 });
 
 // POST /api/cookies
