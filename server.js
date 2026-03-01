@@ -1,10 +1,12 @@
 /**
- * YTDL API v2.1 - Servidor de download do YouTube
+ * YTDL API v2.2 - Servidor de download do YouTube
  * Deploy gratuito no Render.com
  * 
  * Usa ytdl-core + yt-dlp com cookies para autenticação.
  * 1) Tenta ytdl-core com cookies
  * 2) Se falhar, usa yt-dlp com cookies (mais robusto)
+ * 
+ * Aceita cookiesTxt (texto Netscape) no POST body de /api/info
  */
 
 const express = require('express');
@@ -236,12 +238,20 @@ app.post('/api/info', authenticate, async (req, res) => {
     const url = req.body.url || req.query.url;
     if (!url) return res.status(400).json({ error: 'URL é obrigatória' });
 
-    // Se recebeu cookies inline, salvar para uso
-    if (req.body.cookies && Array.isArray(req.body.cookies) && req.body.cookies.length > 0) {
+    // Se recebeu cookiesTxt (texto bruto Netscape), parsear e salvar
+    if (req.body.cookiesTxt && typeof req.body.cookiesTxt === 'string') {
+      const parsed = parseCookiesTxt(req.body.cookiesTxt);
+      if (parsed.length > 0) {
+        saveCookies(parsed);
+        console.log(`[INFO] Cookies inline (cookiesTxt): ${parsed.length} cookies`);
+      }
+    }
+    // Se recebeu cookies (array já parseado), salvar
+    else if (req.body.cookies && Array.isArray(req.body.cookies) && req.body.cookies.length > 0) {
       const ytCookies = req.body.cookies.filter(c => c.domain && (c.domain.includes('youtube.com') || c.domain.includes('google.com')));
       if (ytCookies.length > 0) {
         saveCookies(ytCookies);
-        console.log(`[INFO] Cookies inline recebidos: ${ytCookies.length}`);
+        console.log(`[INFO] Cookies inline (array): ${ytCookies.length}`);
       }
     }
 
