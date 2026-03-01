@@ -53,19 +53,41 @@ function saveCookies(cookies) {
     fs.writeFileSync(COOKIES_JSON, JSON.stringify({ cookies, savedAt: new Date().toISOString(), count: cookies.length }, null, 2));
     ytAgent = ytdl.createAgent(cookies);
 
-    // Salvar formato Netscape para yt-dlp
-    let txt = '# Netscape HTTP Cookie File\n';
-    for (const c of cookies) {
-      const httpOnly = c.httpOnly ? '#HttpOnly_' : '';
-      txt += `${httpOnly}${c.domain}\tTRUE\t${c.path || '/'}\t${c.secure ? 'TRUE' : 'FALSE'}\t${c.expires || 0}\t${c.name}\t${c.value}\n`;
+    // Salvar formato Netscape para yt-dlp (apenas se não tiver o original)
+    if (!fs.existsSync(COOKIES_TXT)) {
+      let txt = '# Netscape HTTP Cookie File\n';
+      for (const c of cookies) {
+        const httpOnly = c.httpOnly ? '#HttpOnly_' : '';
+        txt += `${httpOnly}${c.domain}\tTRUE\t${c.path || '/'}\t${c.secure ? 'TRUE' : 'FALSE'}\t${c.expires || 0}\t${c.name}\t${c.value}\n`;
+      }
+      fs.writeFileSync(COOKIES_TXT, txt);
     }
-    fs.writeFileSync(COOKIES_TXT, txt);
 
     console.log(`[COOKIES] Salvos ${cookies.length} cookies (JSON + TXT)`);
     return true;
   } catch (e) {
     console.error(`[COOKIES] Erro ao salvar: ${e.message}`);
     return false;
+  }
+}
+
+// Salvar cookiesTxt original direto (preserva formatação para yt-dlp)
+function saveRawCookiesTxt(rawText) {
+  try {
+    fs.writeFileSync(COOKIES_TXT, rawText);
+    console.log(`[COOKIES] Salvo cookies.txt original (${rawText.length} chars)`);
+    
+    // Também parsear para ytdl-core
+    const parsed = parseCookiesTxt(rawText);
+    if (parsed.length > 0) {
+      fs.writeFileSync(COOKIES_JSON, JSON.stringify({ cookies: parsed, savedAt: new Date().toISOString(), count: parsed.length }, null, 2));
+      ytAgent = ytdl.createAgent(parsed);
+      console.log(`[COOKIES] ytdl-core agent criado com ${parsed.length} cookies`);
+    }
+    return parsed.length;
+  } catch (e) {
+    console.error(`[COOKIES] Erro ao salvar raw: ${e.message}`);
+    return 0;
   }
 }
 
@@ -204,14 +226,22 @@ async function getVideoData(url) {
 // ============================================================
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'ytdl-api', version: '2.3.0', cookies: ytAgent ? 'configurados' : 'nao_configurados', cookieFile: fs.existsSync(COOKIES_TXT) });
+  res.json({ status: 'ok', service: 'ytdl-api', version: '2.3.1', cookies: ytAgent ? 'configurados' : 'nao_configurados', cookieFile: fs.existsSync(COOKIES_TXT) });
 });
 
 // POST /api/cookies
 app.post('/api/cookies', authenticate, (req, res) => {
   try {
+    // Preferir salvar o texto original (preserva formatação para yt-dlp)
+    if (req.body.cookiesTxt && typeof req.body.cookiesTxt === 'string') {
+      const count = saveRawCookiesTxt(req.body.cookiesTxt);
+      if (count > 0) {
+        return res.json({ success: true, message: `${count} cookies salvos (formato original)!`, count });
+      }
+    }
+    
+    // Fallback: array de cookies
     let cookies = req.body.cookies;
-    if (req.body.cookiesTxt) cookies = parseCookiesTxt(req.body.cookiesTxt);
     if (!cookies || !Array.isArray(cookies) || cookies.length === 0) {
       return res.status(400).json({ error: 'Cookies inválidos.' });
     }
@@ -247,13 +277,10 @@ app.post('/api/info', authenticate, async (req, res) => {
     const url = req.body.url || req.query.url;
     if (!url) return res.status(400).json({ error: 'URL é obrigatória' });
 
-    // Se recebeu cookiesTxt (texto bruto Netscape), parsear e salvar
+    // Se recebeu cookiesTxt (texto bruto Netscape), salvar original
     if (req.body.cookiesTxt && typeof req.body.cookiesTxt === 'string') {
-      const parsed = parseCookiesTxt(req.body.cookiesTxt);
-      if (parsed.length > 0) {
-        saveCookies(parsed);
-        console.log(`[INFO] Cookies inline (cookiesTxt): ${parsed.length} cookies`);
-      }
+      const count = saveRawCookiesTxt(req.body.cookiesTxt);
+      console.log(`[INFO] Cookies inline (raw cookiesTxt): ${count} cookies`);
     }
     // Se recebeu cookies (array já parseado), salvar
     else if (req.body.cookies && Array.isArray(req.body.cookies) && req.body.cookies.length > 0) {
