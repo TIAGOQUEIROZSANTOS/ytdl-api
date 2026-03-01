@@ -1,15 +1,16 @@
 /**
- * YTDL API - Servidor de download do YouTube
+ * YTDL API v2.1 - Servidor de download do YouTube
  * Deploy gratuito no Render.com
  * 
- * Usa @distube/ytdl-core com cookies do YouTube para autenticação.
- * O admin exporta os cookies do navegador e envia via /api/cookies.
- * Os cookies são usados em todas as requisições ao YouTube.
+ * Usa ytdl-core + yt-dlp com cookies para autenticação.
+ * 1) Tenta ytdl-core com cookies
+ * 2) Se falhar, usa yt-dlp com cookies (mais robusto)
  */
 
 const express = require('express');
 const cors = require('cors');
 const ytdl = require('@distube/ytdl-core');
+const youtubedl = require('youtube-dl-exec');
 const fs = require('fs');
 const path = require('path');
 
@@ -17,25 +18,23 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
-// Chave de API simples para proteger o serviço
 const API_KEY = process.env.API_KEY || 'seven7scala-ytdl-2024';
-
-// Limite de duração (7 minutos = 420 segundos)
-const MAX_DURATION = 420;
+const MAX_DURATION = 420; // 7 minutos
 
 // ============================================================
-// COOKIES - Gerenciamento de cookies do YouTube
+// COOKIES
 // ============================================================
-const COOKIES_FILE = path.join('/tmp', 'youtube-cookies.json');
+const COOKIES_JSON = path.join('/tmp', 'youtube-cookies.json');
+const COOKIES_TXT = path.join('/tmp', 'youtube-cookies.txt');
 let ytAgent = null;
 
 function loadCookies() {
   try {
-    if (fs.existsSync(COOKIES_FILE)) {
-      const data = JSON.parse(fs.readFileSync(COOKIES_FILE, 'utf8'));
+    if (fs.existsSync(COOKIES_JSON)) {
+      const data = JSON.parse(fs.readFileSync(COOKIES_JSON, 'utf8'));
       if (data.cookies && data.cookies.length > 0) {
         ytAgent = ytdl.createAgent(data.cookies);
-        console.log(`[COOKIES] Carregados ${data.cookies.length} cookies (salvos em ${data.savedAt || 'desconhecido'})`);
+        console.log(`[COOKIES] Carregados ${data.cookies.length} cookies`);
         return true;
       }
     }
@@ -48,10 +47,19 @@ function loadCookies() {
 
 function saveCookies(cookies) {
   try {
-    const data = { cookies, savedAt: new Date().toISOString(), count: cookies.length };
-    fs.writeFileSync(COOKIES_FILE, JSON.stringify(data, null, 2));
+    // Salvar JSON para ytdl-core
+    fs.writeFileSync(COOKIES_JSON, JSON.stringify({ cookies, savedAt: new Date().toISOString(), count: cookies.length }, null, 2));
     ytAgent = ytdl.createAgent(cookies);
-    console.log(`[COOKIES] Salvos ${cookies.length} cookies`);
+
+    // Salvar formato Netscape para yt-dlp
+    let txt = '# Netscape HTTP Cookie File\n';
+    for (const c of cookies) {
+      const httpOnly = c.httpOnly ? '#HttpOnly_' : '';
+      txt += `${httpOnly}${c.domain}\tTRUE\t${c.path || '/'}\t${c.secure ? 'TRUE' : 'FALSE'}\t${c.expires || 0}\t${c.name}\t${c.value}\n`;
+    }
+    fs.writeFileSync(COOKIES_TXT, txt);
+
+    console.log(`[COOKIES] Salvos ${cookies.length} cookies (JSON + TXT)`);
     return true;
   } catch (e) {
     console.error(`[COOKIES] Erro ao salvar: ${e.message}`);
@@ -59,111 +67,37 @@ function saveCookies(cookies) {
   }
 }
 
-// Carregar cookies ao iniciar
 loadCookies();
 
-// Opções para ytdl com ou sem cookies
 function getYtdlOptions() {
-  if (ytAgent) {
-    return { agent: ytAgent };
-  }
-  return {};
+  return ytAgent ? { agent: ytAgent } : {};
 }
 
-// Middleware de autenticação
+function hasCookiesTxt() {
+  return fs.existsSync(COOKIES_TXT);
+}
+
+// Auth middleware
 function authenticate(req, res, next) {
   const key = req.headers['x-api-key'] || req.query.key;
-  if (key !== API_KEY) {
-    return res.status(403).json({ error: 'Chave de API inválida' });
-  }
+  if (key !== API_KEY) return res.status(403).json({ error: 'Chave de API inválida' });
   next();
 }
 
-// Health check
-app.get('/', (req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'ytdl-api',
-    version: '2.0.0',
-    cookies: ytAgent ? 'configurados' : 'nao_configurados'
-  });
-});
-
 // ============================================================
-// POST /api/cookies - Salvar cookies do YouTube
-// Body: { cookies: [...] } ou { cookiesTxt: "..." }
-// ============================================================
-app.post('/api/cookies', authenticate, (req, res) => {
-  try {
-    let cookies = req.body.cookies;
-
-    // Se veio no formato cookies.txt (Netscape), converter
-    if (req.body.cookiesTxt) {
-      cookies = parseCookiesTxt(req.body.cookiesTxt);
-    }
-
-    if (!cookies || !Array.isArray(cookies) || cookies.length === 0) {
-      return res.status(400).json({ error: 'Cookies inválidos. Envie um array de cookies ou cookiesTxt no formato Netscape.' });
-    }
-
-    // Filtrar apenas cookies do YouTube/Google
-    const ytCookies = cookies.filter(c =>
-      c.domain && (
-        c.domain.includes('youtube.com') ||
-        c.domain.includes('google.com') ||
-        c.domain.includes('.youtube.com') ||
-        c.domain.includes('.google.com')
-      )
-    );
-
-    if (ytCookies.length === 0) {
-      return res.status(400).json({ error: 'Nenhum cookie do YouTube/Google encontrado.' });
-    }
-
-    if (saveCookies(ytCookies)) {
-      res.json({ success: true, message: `${ytCookies.length} cookies salvos com sucesso!`, count: ytCookies.length });
-    } else {
-      res.status(500).json({ error: 'Erro ao salvar cookies.' });
-    }
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// GET /api/cookies/status - Verificar se cookies estão configurados
-app.get('/api/cookies/status', authenticate, (req, res) => {
-  loadCookies(); // Recarregar
-  res.json({
-    configured: !!ytAgent,
-    file: fs.existsSync(COOKIES_FILE)
-  });
-});
-
-// DELETE /api/cookies - Remover cookies
-app.delete('/api/cookies', authenticate, (req, res) => {
-  try {
-    if (fs.existsSync(COOKIES_FILE)) fs.unlinkSync(COOKIES_FILE);
-    ytAgent = null;
-    res.json({ success: true, message: 'Cookies removidos.' });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ============================================================
-// Parser de cookies.txt (formato Netscape)
+// Parser cookies.txt (Netscape)
 // ============================================================
 function parseCookiesTxt(text) {
   const cookies = [];
-  const lines = text.split('\n');
-  for (const line of lines) {
+  for (const line of text.split('\n')) {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const parts = trimmed.split('\t');
+    if (!trimmed || (trimmed.startsWith('#') && !trimmed.startsWith('#HttpOnly_'))) continue;
+    const clean = trimmed.startsWith('#HttpOnly_') ? trimmed.replace('#HttpOnly_', '') : trimmed;
+    const parts = clean.split('\t');
     if (parts.length >= 7) {
       cookies.push({
         domain: parts[0],
-        httpOnly: parts[0].startsWith('#HttpOnly_') ? true : false,
+        httpOnly: trimmed.startsWith('#HttpOnly_'),
         path: parts[2],
         secure: parts[3].toLowerCase() === 'true',
         expires: parseInt(parts[4]) || 0,
@@ -176,27 +110,130 @@ function parseCookiesTxt(text) {
 }
 
 // ============================================================
-// GET /api/info - Buscar informações do vídeo
+// CORE: Buscar info via ytdl-core, fallback yt-dlp
 // ============================================================
+async function getVideoData(url) {
+  // 1) Tentar ytdl-core
+  try {
+    console.log(`[CORE] Tentando ytdl-core (cookies: ${ytAgent ? 'SIM' : 'NAO'})...`);
+    const info = await ytdl.getInfo(url, getYtdlOptions());
+    const playable = info.formats.filter(f => f.url);
+    if (playable.length === 0) throw new Error('No playable formats found');
+    console.log(`[CORE] ytdl-core OK: ${playable.length} formatos`);
+    return { source: 'ytdl-core', info, formats: info.formats };
+  } catch (e1) {
+    console.log(`[CORE] ytdl-core falhou: ${e1.message.substring(0, 100)}`);
+  }
+
+  // 2) Fallback: yt-dlp
+  try {
+    console.log(`[CORE] Tentando yt-dlp (cookies: ${hasCookiesTxt() ? 'SIM' : 'NAO'})...`);
+    const opts = {
+      dumpSingleJson: true,
+      noCheckCertificates: true,
+      noWarnings: true,
+      preferFreeFormats: true,
+      addHeader: ['referer:https://www.youtube.com', 'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36']
+    };
+    if (hasCookiesTxt()) {
+      opts.cookies = COOKIES_TXT;
+    }
+
+    const info = await youtubedl(url, opts);
+    console.log(`[CORE] yt-dlp OK: "${info.title}" - ${(info.formats || []).length} formatos`);
+
+    // Converter formatos yt-dlp para formato compatível
+    const formats = (info.formats || [])
+      .filter(f => f.url)
+      .map(f => ({
+        itag: f.format_id ? parseInt(f.format_id) || 0 : 0,
+        url: f.url,
+        mimeType: f.vcodec !== 'none' ? `video/${f.ext || 'mp4'}` : `audio/${f.ext || 'mp4'}`,
+        qualityLabel: f.format_note || (f.height ? `${f.height}p` : ''),
+        hasVideo: f.vcodec !== 'none',
+        hasAudio: f.acodec !== 'none',
+        height: f.height || 0,
+        audioBitrate: f.abr || 0,
+        contentLength: f.filesize ? String(f.filesize) : '0',
+        container: f.ext || 'mp4',
+        fps: f.fps || 30
+      }));
+
+    return {
+      source: 'yt-dlp',
+      info: {
+        videoDetails: {
+          title: info.title || 'video',
+          lengthSeconds: String(info.duration || 0),
+          thumbnails: info.thumbnail ? [{ url: info.thumbnail }] : [],
+          author: { name: info.uploader || info.channel || '' }
+        }
+      },
+      formats
+    };
+  } catch (e2) {
+    console.error(`[CORE] yt-dlp falhou: ${e2.message?.substring(0, 150) || e2}`);
+    throw new Error(e2.message || 'Todos os métodos falharam');
+  }
+}
+
+// ============================================================
+// ENDPOINTS
+// ============================================================
+
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', service: 'ytdl-api', version: '2.1.0', cookies: ytAgent ? 'configurados' : 'nao_configurados' });
+});
+
+// POST /api/cookies
+app.post('/api/cookies', authenticate, (req, res) => {
+  try {
+    let cookies = req.body.cookies;
+    if (req.body.cookiesTxt) cookies = parseCookiesTxt(req.body.cookiesTxt);
+    if (!cookies || !Array.isArray(cookies) || cookies.length === 0) {
+      return res.status(400).json({ error: 'Cookies inválidos.' });
+    }
+    const ytCookies = cookies.filter(c => c.domain && (c.domain.includes('youtube.com') || c.domain.includes('google.com')));
+    if (ytCookies.length === 0) return res.status(400).json({ error: 'Nenhum cookie do YouTube/Google encontrado.' });
+    if (saveCookies(ytCookies)) {
+      res.json({ success: true, message: `${ytCookies.length} cookies salvos!`, count: ytCookies.length });
+    } else {
+      res.status(500).json({ error: 'Erro ao salvar cookies.' });
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/cookies/status', authenticate, (req, res) => {
+  loadCookies();
+  res.json({ configured: !!ytAgent, file: fs.existsSync(COOKIES_JSON) });
+});
+
+app.delete('/api/cookies', authenticate, (req, res) => {
+  try {
+    if (fs.existsSync(COOKIES_JSON)) fs.unlinkSync(COOKIES_JSON);
+    if (fs.existsSync(COOKIES_TXT)) fs.unlinkSync(COOKIES_TXT);
+    ytAgent = null;
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/info
 app.get('/api/info', authenticate, async (req, res) => {
   try {
     const { url } = req.query;
     if (!url) return res.status(400).json({ error: 'URL é obrigatória' });
 
-    console.log(`[INFO] Buscando: ${url} (cookies: ${ytAgent ? 'SIM' : 'NAO'})`);
+    console.log(`[INFO] Buscando: ${url}`);
+    const data = await getVideoData(url);
 
-    const options = getYtdlOptions();
-    const info = await ytdl.getInfo(url, options);
-
-    const duration = parseInt(info.videoDetails.lengthSeconds);
+    const duration = parseInt(data.info.videoDetails.lengthSeconds);
     if (duration > MAX_DURATION) {
-      return res.status(400).json({
-        error: `Vídeo muito longo (${Math.ceil(duration / 60)} min). Limite: ${Math.ceil(MAX_DURATION / 60)} minutos.`
-      });
+      return res.status(400).json({ error: `Vídeo muito longo (${Math.ceil(duration / 60)} min). Limite: ${Math.ceil(MAX_DURATION / 60)} min.` });
     }
 
-    // Formatos de vídeo com áudio (para download MP4)
-    const videoFormats = info.formats
+    const videoFormats = data.formats
       .filter(f => f.hasAudio && f.hasVideo && f.url)
       .sort((a, b) => (b.height || 0) - (a.height || 0))
       .slice(0, 6)
@@ -211,8 +248,7 @@ app.get('/api/info', authenticate, async (req, res) => {
         hasVideo: true
       }));
 
-    // Formatos de áudio (para download MP3)
-    const audioFormats = info.formats
+    const audioFormats = data.formats
       .filter(f => f.hasAudio && !f.hasVideo && f.url)
       .sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0))
       .slice(0, 4)
@@ -227,102 +263,106 @@ app.get('/api/info', authenticate, async (req, res) => {
         hasVideo: false
       }));
 
-    const thumbnail = info.videoDetails.thumbnails?.length > 0
-      ? info.videoDetails.thumbnails[info.videoDetails.thumbnails.length - 1].url
-      : '';
+    const thumbnails = data.info.videoDetails.thumbnails || [];
+    const thumbnail = thumbnails.length > 0 ? thumbnails[thumbnails.length - 1].url : '';
 
-    console.log(`[INFO] OK: "${info.videoDetails.title}" - ${videoFormats.length} video, ${audioFormats.length} audio`);
+    console.log(`[INFO] OK (${data.source}): "${data.info.videoDetails.title}" - ${videoFormats.length} video, ${audioFormats.length} audio`);
 
     res.json({
-      title: info.videoDetails.title,
-      duration: info.videoDetails.lengthSeconds,
+      title: data.info.videoDetails.title,
+      duration: data.info.videoDetails.lengthSeconds,
       thumbnail,
-      author: info.videoDetails.author?.name || '',
+      author: data.info.videoDetails.author?.name || '',
       videoFormats,
-      audioFormats
+      audioFormats,
+      source: data.source
     });
   } catch (e) {
-    console.error(`[INFO] ERRO: ${e.message}`);
+    console.error(`[INFO] ERRO FINAL: ${e.message}`);
     res.status(500).json({ error: e.message });
   }
 });
 
-// ============================================================
-// GET /api/download - Fazer download/stream do vídeo
-// ============================================================
+// GET /api/download
 app.get('/api/download', authenticate, async (req, res) => {
   try {
     const { url, itag, format } = req.query;
     if (!url) return res.status(400).json({ error: 'URL é obrigatória' });
 
-    console.log(`[DOWNLOAD] Iniciando: ${url} (itag=${itag}, format=${format}, cookies: ${ytAgent ? 'SIM' : 'NAO'})`);
+    console.log(`[DOWNLOAD] ${url} (itag=${itag}, format=${format})`);
+    const data = await getVideoData(url);
 
-    const options = getYtdlOptions();
-    const info = await ytdl.getInfo(url, options);
-
-    const duration = parseInt(info.videoDetails.lengthSeconds);
+    const duration = parseInt(data.info.videoDetails.lengthSeconds);
     if (duration > MAX_DURATION) {
-      return res.status(400).json({
-        error: `Vídeo muito longo (${Math.ceil(duration / 60)} min). Limite: ${Math.ceil(MAX_DURATION / 60)} minutos.`
-      });
+      return res.status(400).json({ error: 'Vídeo muito longo.' });
     }
 
     // Selecionar formato
     let selectedFormat;
     if (itag) {
-      selectedFormat = info.formats.find(f => f.itag === parseInt(itag));
+      selectedFormat = data.formats.find(f => f.itag === parseInt(itag) && f.url);
     }
     if (!selectedFormat) {
       if (format === 'mp3' || format === 'audio') {
-        selectedFormat = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' });
+        selectedFormat = data.formats
+          .filter(f => f.hasAudio && !f.hasVideo && f.url)
+          .sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0))[0];
       } else {
-        selectedFormat = info.formats
+        selectedFormat = data.formats
           .filter(f => f.hasAudio && f.hasVideo && f.url)
           .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
-        if (!selectedFormat) {
-          selectedFormat = ytdl.chooseFormat(info.formats, { quality: 'highest' });
-        }
       }
     }
-
     if (!selectedFormat) {
-      return res.status(404).json({ error: 'Formato não encontrado' });
+      // Fallback: pega qualquer formato disponível
+      selectedFormat = data.formats.filter(f => f.url)[0];
     }
+    if (!selectedFormat) return res.status(404).json({ error: 'Formato não encontrado' });
 
-    const title = info.videoDetails.title.replace(/[^\w\s\-\u00C0-\u024F]/g, '').trim() || 'video';
+    const title = (data.info.videoDetails.title || 'video').replace(/[^\w\s\-\u00C0-\u024F]/g, '').trim() || 'video';
     const isAudio = !selectedFormat.hasVideo;
     const ext = isAudio ? 'mp3' : (selectedFormat.container || 'mp4');
 
-    console.log(`[DOWNLOAD] Streaming: "${title}.${ext}" (itag=${selectedFormat.itag})`);
+    console.log(`[DOWNLOAD] Streaming (${data.source}): "${title}.${ext}"`);
 
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(title)}.${ext}"`);
     res.setHeader('Content-Type', selectedFormat.mimeType || (isAudio ? 'audio/mpeg' : 'video/mp4'));
-    if (selectedFormat.contentLength) {
+    if (selectedFormat.contentLength && selectedFormat.contentLength !== '0') {
       res.setHeader('Content-Length', selectedFormat.contentLength);
     }
 
-    const downloadOptions = { format: selectedFormat, ...options };
-    const stream = ytdl.downloadFromInfo(info, downloadOptions);
+    if (data.source === 'ytdl-core') {
+      // Stream via ytdl-core
+      const stream = ytdl.downloadFromInfo(data.info, { format: selectedFormat, ...getYtdlOptions() });
+      stream.on('error', (err) => {
+        console.error(`[DOWNLOAD] ytdl-core stream error: ${err.message}`);
+        if (!res.headersSent) res.status(500).json({ error: err.message });
+      });
+      stream.pipe(res);
+    } else {
+      // Stream via fetch direto da URL do yt-dlp
+      const fetchResponse = await fetch(selectedFormat.url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Referer': 'https://www.youtube.com'
+        }
+      });
+      if (!fetchResponse.ok) throw new Error(`HTTP ${fetchResponse.status}`);
 
-    stream.on('error', (err) => {
-      console.error(`[DOWNLOAD] Stream error: ${err.message}`);
-      if (!res.headersSent) {
-        res.status(500).json({ error: err.message });
-      }
-    });
-
-    stream.pipe(res);
+      // Converter ReadableStream para Node stream
+      const { Readable } = require('stream');
+      const nodeStream = Readable.fromWeb(fetchResponse.body);
+      nodeStream.pipe(res);
+    }
   } catch (e) {
     console.error(`[DOWNLOAD] ERRO: ${e.message}`);
-    if (!res.headersSent) {
-      res.status(500).json({ error: e.message });
-    }
+    if (!res.headersSent) res.status(500).json({ error: e.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ YTDL API v2.0 rodando na porta ${PORT}`);
-  console.log(`   API Key: ${API_KEY}`);
-  console.log(`   Cookies: ${ytAgent ? 'CONFIGURADOS' : 'NÃO CONFIGURADOS'}`);
+  console.log(`✅ YTDL API v2.1 na porta ${PORT}`);
+  console.log(`   Cookies: ${ytAgent ? 'ATIVOS' : 'NÃO CONFIGURADOS'}`);
+  console.log(`   Cookies TXT: ${hasCookiesTxt() ? 'SIM' : 'NÃO'}`);
 });
